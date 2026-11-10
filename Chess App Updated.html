@@ -1,0 +1,989 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Student Chess Arena (Ultra-Compatible Edition)</title>
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- React 18 & ReactDOM 18 CDN -->
+    <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
+    <!-- PeerJS CDN for Real-Time Peer-to-Peer Connections -->
+    <script src="https://unpkg.com/peerjs@1.5.2/dist/peerjs.min.js"></script>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: #0f172a;
+            color: #f8fafc;
+        }
+        .board-grid {
+            display: grid;
+            grid-template-columns: repeat(8, 1fr);
+            grid-template-rows: repeat(8, 1fr);
+            aspect-ratio: 1 / 1;
+        }
+        .piece-white {
+            color: #ffffff;
+            text-shadow: 
+                -1.5px -1.5px 0 #000,  
+                 1.5px -1.5px 0 #000,
+                -1.5px  1.5px 0 #000,
+                 1.5px  1.5px 0 #000,
+                 0px 3px 6px rgba(0,0,0,0.8);
+        }
+        .piece-black {
+            color: #0f172a;
+            text-shadow: 
+                -1px -1px 0 #f8fafc,  
+                 1px -1px 0 #f8fafc,
+                -1px  1px 0 #f8fafc,
+                 1px  1px 0 #f8fafc,
+                 0px 3px 6px rgba(0,0,0,0.6);
+        }
+    </style>
+</head>
+<body class="min-h-screen bg-slate-900 text-slate-100 flex flex-col justify-between">
+
+    <div id="root"></div>
+
+    <script>
+        // Clean out legacy state
+        try {
+            const rawUser = localStorage.getItem('chess_active_user');
+            if (rawUser) {
+                const parsed = JSON.parse(rawUser);
+                if (!parsed || !parsed.username || !parsed.name || String(parsed.username).toLowerCase().includes('column')) {
+                    localStorage.removeItem('chess_active_user');
+                }
+            }
+        } catch(e) {
+            localStorage.clear();
+        }
+
+        const { useState, useEffect, createElement: e } = React;
+
+        // =========================================================================
+        // PASTE YOUR GOOGLE APPS SCRIPT WEB APP URL HERE IF USING GOOGLE SHEETS:
+        // =========================================================================
+       const GOOGLE_SCRIPT_URL = "https://script.google.com/macros/s/YOUR_SCRIPT_ID/exec";
+
+        const PIECE_SYMBOLS = {
+            wP: '♙', wN: '♘', wB: '♗', wR: '♖', wQ: '♕', wK: '♔',
+            bP: '♟', bN: '♞', bB: '♝', bR: '♜', bQ: '♛', bK: '♚'
+        };
+
+        const AVATARS = ['🎓', '🦁', '🦉', '🚀', '⚡', '🏆', '🦊', '👾', '🤖', '👑'];
+
+        const INITIAL_BOARD = [
+            ['bR', 'bN', 'bB', 'bQ', 'bK', 'bB', 'bN', 'bR'],
+            ['bP', 'bP', 'bP', 'bP', 'bP', 'bP', 'bP', 'bP'],
+            [null, null, null, null, null, null, null, null],
+            [null, null, null, null, null, null, null, null],
+            [null, null, null, null, null, null, null, null],
+            [null, null, null, null, null, null, null, null],
+            ['wP', 'wP', 'wP', 'wP', 'wP', 'wP', 'wP', 'wP'],
+            ['wR', 'wN', 'wB', 'wQ', 'wK', 'wB', 'wN', 'wR']
+        ];
+
+        function cleanText(val) {
+            if (!val) return '';
+            const str = String(val).trim();
+            if (/^column/i.test(str) || /^@column/i.test(str) || str.toLowerCase() === 'username' || str.toLowerCase() === 'name') {
+                return '';
+            }
+            return str;
+        }
+
+        function getSafePeerId(username) {
+            if (!username) return '';
+            return 'studentchess-' + String(username).toLowerCase().replace(/[^a-z0-9]/g, '');
+        }
+
+        function calculateEloChange(winnerElo, loserElo) {
+            const K = 32;
+            const expectedWinner = 1 / (1 + Math.pow(10, (loserElo - winnerElo) / 400));
+            const winnerGain = Math.round(K * (1 - expectedWinner));
+            return Math.max(10, winnerGain);
+        }
+
+        function App() {
+            const [users, setUsers] = useState(() => {
+                try {
+                    const saved = localStorage.getItem('chess_students_db');
+                    if (!saved) return [];
+                    const parsed = JSON.parse(saved);
+                    if (!Array.isArray(parsed)) return [];
+                    return parsed.filter(u => u && cleanText(u.username) && cleanText(u.name));
+                } catch(e) {
+                    return [];
+                }
+            });
+
+            const [currentUser, setCurrentUser] = useState(() => {
+                try {
+                    const saved = localStorage.getItem('chess_active_user');
+                    if (!saved) return null;
+                    const u = JSON.parse(saved);
+                    return (u && cleanText(u.username) && cleanText(u.name)) ? u : null;
+                } catch(e) {
+                    return null;
+                }
+            });
+
+            const [authMode, setAuthMode] = useState('register');
+            const [authForm, setAuthForm] = useState({ username: '', password: '', name: '', grade: '6th', avatar: '🎓' });
+            const [authError, setAuthError] = useState('');
+            const [view, setView] = useState('leaderboard');
+            const [board, setBoard] = useState(INITIAL_BOARD);
+            const [turn, setTurn] = useState('w');
+            const [selectedSquare, setSelectedSquare] = useState(null);
+            const [validMoves, setValidMoves] = useState([]);
+            
+            const [whitePlayer, setWhitePlayer] = useState('');
+            const [blackPlayer, setBlackPlayer] = useState('');
+            
+            const [history, setHistory] = useState([]);
+            const [captured, setCaptured] = useState({ w: [], b: [] });
+            const [gameStatus, setGameStatus] = useState('playing');
+            const [lastMatchStats, setLastMatchStats] = useState(null);
+            const [whiteTime, setWhiteTime] = useState(600);
+            const [blackTime, setBlackTime] = useState(600);
+
+            const [peer, setPeer] = useState(null);
+            const [conn, setConn] = useState(null);
+            const [onlineStatus, setOnlineStatus] = useState('Offline');
+            
+            const [incomingChallenge, setIncomingChallenge] = useState(null);
+            const [challengeSentTo, setChallengeSentTo] = useState(null);
+            const [systemNotification, setSystemNotification] = useState('');
+
+            // Fetch users from Google Sheet or LocalStorage
+            const fetchLatestUsers = () => {
+                if (GOOGLE_SCRIPT_URL) {
+                    fetch(GOOGLE_SCRIPT_URL)
+                        .then(res => res.json())
+                        .then(data => {
+                            if (Array.isArray(data)) {
+                                const cleanUsers = data.map(row => {
+                                    if (Array.isArray(row)) {
+                                        const username = cleanText(row[0]);
+                                        const name = cleanText(row[1]) || username;
+                                        if (!username) return null;
+                                        return {
+                                            username: username,
+                                            name: name,
+                                            grade: cleanText(row[2]) || '6th',
+                                            avatar: String(row[3] || '🎓'),
+                                            elo: Number(row[4]) || 1000,
+                                            wins: Number(row[5]) || 0,
+                                            losses: Number(row[6]) || 0,
+                                            draws: Number(row[7]) || 0
+                                        };
+                                    } else if (typeof row === 'object' && row !== null) {
+                                        const username = cleanText(row.username);
+                                        const name = cleanText(row.name) || username;
+                                        if (!username) return null;
+                                        return {
+                                            username: username,
+                                            name: name,
+                                            grade: cleanText(row.grade) || '6th',
+                                            avatar: String(row.avatar || '🎓'),
+                                            elo: Number(row.elo) || 1000,
+                                            wins: Number(row.wins) || 0,
+                                            losses: Number(row.losses) || 0,
+                                            draws: Number(row.draws) || 0
+                                        };
+                                    }
+                                    return null;
+                                }).filter(u => u !== null);
+
+                                if (cleanUsers.length > 0) {
+                                    setUsers(cleanUsers);
+                                }
+                            }
+                        })
+                        .catch(err => console.error("Sheet load error:", err));
+                }
+            };
+
+            // Auto-polling: Sync Google Sheet database every 3 seconds
+            useEffect(() => {
+                fetchLatestUsers();
+                const interval = setInterval(fetchLatestUsers, 3000);
+                return () => clearInterval(interval);
+            }, []);
+
+            // PeerJS Real-Time Connection with Google STUN Servers (Fixes NAT / Firewall connectivity across different computers)
+            useEffect(() => {
+                if (currentUser && currentUser.username && typeof Peer !== 'undefined') {
+                    const cleanUser = cleanText(currentUser.username);
+                    if (!cleanUser) return;
+                    
+                    try {
+                        const safePeerId = getSafePeerId(cleanUser);
+                        const newPeer = new Peer(safePeerId, {
+                            config: {
+                                iceServers: [
+                                    { urls: 'stun:stun.l.google.com:19302' },
+                                    { urls: 'stun:stun1.l.google.com:19302' },
+                                    { urls: 'stun:stun2.l.google.com:19302' }
+                                ]
+                            }
+                        });
+
+                        newPeer.on('open', () => setOnlineStatus('Online'));
+                        newPeer.on('connection', (c) => {
+                            c.on('data', (data) => handleIncomingSocketData(data, c));
+                        });
+
+                        newPeer.on('error', (err) => console.log('PeerJS note:', err));
+
+                        setPeer(newPeer);
+                        return () => newPeer.destroy();
+                    } catch(err) { console.error(err); }
+                }
+            }, [currentUser]);
+
+            const handleIncomingSocketData = (data, activeConnection) => {
+                if (!data) return;
+
+                if (data.type === 'CHALLENGE_REQUEST') {
+                    setIncomingChallenge({
+                        challengerUsername: data.challengerUsername,
+                        challengerName: data.challengerName,
+                        challengerElo: data.challengerElo,
+                        challengerAvatar: data.challengerAvatar,
+                        connection: activeConnection
+                    });
+                } else if (data.type === 'CHALLENGE_ACCEPTED') {
+                    setConn(activeConnection || conn);
+                    setChallengeSentTo(null);
+                    setWhitePlayer(data.whitePlayer);
+                    setBlackPlayer(data.blackPlayer);
+                    resetGame();
+                    setView('play');
+                    setSystemNotification("⚔️ Match accepted! Game started.");
+                    setTimeout(() => setSystemNotification(''), 4000);
+                } else if (data.type === 'CHALLENGE_DENIED') {
+                    setChallengeSentTo(null);
+                    setSystemNotification("🚫 Classmate declined the challenge request.");
+                    setTimeout(() => setSystemNotification(''), 4000);
+                } else if (data.type === 'MOVE') {
+                    setBoard(data.board);
+                    setTurn(data.turn);
+                    setHistory(data.history);
+                    setGameStatus(data.gameStatus);
+                }
+            };
+
+            const sendChallengeRequest = (targetUsername) => {
+                if (!peer || !currentUser) return;
+                const targetObj = users.find(u => u.username === targetUsername);
+                const targetId = getSafePeerId(targetUsername);
+                
+                try {
+                    const c = peer.connect(targetId);
+                    setChallengeSentTo(targetObj ? targetObj.name : targetUsername);
+
+                    c.on('open', () => {
+                        setConn(c);
+                        c.send({
+                            type: 'CHALLENGE_REQUEST',
+                            challengerUsername: currentUser.username,
+                            challengerName: currentUser.name,
+                            challengerElo: currentUser.elo || 1000,
+                            challengerAvatar: currentUser.avatar || '🎓'
+                        });
+                    });
+
+                    c.on('data', (data) => handleIncomingSocketData(data, c));
+
+                    setTimeout(() => {
+                        setChallengeSentTo(null);
+                    }, 10000);
+                } catch(e) {
+                    setChallengeSentTo(null);
+                    setSystemNotification("Could not reach classmate.");
+                    setTimeout(() => setSystemNotification(''), 4000);
+                }
+            };
+
+            const acceptChallenge = () => {
+                if (!incomingChallenge) return;
+                const activeConn = incomingChallenge.connection;
+                setConn(activeConn);
+
+                const whiteP = incomingChallenge.challengerUsername;
+                const blackP = currentUser.username;
+
+                setWhitePlayer(whiteP);
+                setBlackPlayer(blackP);
+                resetGame();
+                setView('play');
+
+                if (activeConn) {
+                    activeConn.send({
+                        type: 'CHALLENGE_ACCEPTED',
+                        whitePlayer: whiteP,
+                        blackPlayer: blackP
+                    });
+                }
+                setIncomingChallenge(null);
+            };
+
+            const denyChallenge = () => {
+                if (!incomingChallenge) return;
+                const activeConn = incomingChallenge.connection;
+
+                if (activeConn) {
+                    activeConn.send({
+                        type: 'CHALLENGE_DENIED',
+                        deniedByName: currentUser.name
+                    });
+                }
+                setIncomingChallenge(null);
+            };
+
+            useEffect(() => {
+                if (currentUser) {
+                    setWhitePlayer(currentUser.username);
+                    const validOpponent = users.find(u => u.username !== currentUser.username && cleanText(u.username));
+                    if (validOpponent) setBlackPlayer(validOpponent.username);
+                }
+            }, [currentUser, users]);
+
+            useEffect(() => {
+                try { localStorage.setItem('chess_students_db', JSON.stringify(users)); } catch(e) {}
+            }, [users]);
+
+            useEffect(() => {
+                try {
+                    if (currentUser) {
+                        const updatedSelf = users.find(u => u.username === currentUser.username);
+                        localStorage.setItem('chess_active_user', JSON.stringify(updatedSelf || currentUser));
+                    } else {
+                        localStorage.removeItem('chess_active_user');
+                    }
+                } catch(e) {}
+            }, [currentUser, users]);
+
+            useEffect(() => {
+                if (gameStatus !== 'playing') return;
+                const timer = setInterval(() => {
+                    if (turn === 'w') {
+                        setWhiteTime(t => {
+                            if (t <= 1) { handleGameOver('black_win'); return 0; }
+                            return t - 1;
+                        });
+                    } else {
+                        setBlackTime(t => {
+                            if (t <= 1) { handleGameOver('white_win'); return 0; }
+                            return t - 1;
+                        });
+                    }
+                }, 1000);
+                return () => clearInterval(timer);
+            }, [turn, gameStatus]);
+
+            const findKing = (color, b) => {
+                const kingSymbol = color + 'K';
+                for (let r = 0; r < 8; r++) {
+                    for (let c = 0; c < 8; c++) {
+                        if (b[r][c] === kingSymbol) return [r, c];
+                    }
+                }
+                return null;
+            };
+
+            const isSquareAttacked = (r, c, attackerColor, b) => {
+                for (let dr = -1; dr <= 1; dr++) {
+                    for (let dc = -1; dc <= 1; dc++) {
+                        if (dr === 0 && dc === 0) continue;
+                        const nr = r + dr, nc = c + dc;
+                        if (nr >= 0 && nr < 8 && nc >= 0 && nc < 8) {
+                            const p = b[nr][nc];
+                            if (p && p[0] === attackerColor && (p[1] === 'K' || (p[1] === 'P' && dr === (attackerColor === 'w' ? 1 : -1)))) {
+                                return true;
+                            }
+                        }
+                    }
+                }
+                return false;
+            };
+
+            const isKingInCheck = (color, b) => {
+                const kingPos = findKing(color, b);
+                if (!kingPos) return false;
+                const enemyColor = color === 'w' ? 'b' : 'w';
+                return isSquareAttacked(kingPos[0], kingPos[1], enemyColor, b);
+            };
+
+            const getPseudoMoves = (r, c, b) => {
+                const piece = b[r][c];
+                if (!piece) return [];
+                const color = piece[0];
+                const type = piece[1];
+                const moves = [];
+
+                const addIfValid = (nr, nc) => {
+                    if (nr >= 0 && nr < 8 && nc >= 0 && nc < 8) {
+                        const dest = b[nr][nc];
+                        if (!dest || dest[0] !== color) {
+                            moves.push([nr, nc]);
+                            return !dest;
+                        }
+                    }
+                    return false;
+                };
+
+                if (type === 'P') {
+                    const dir = color === 'w' ? -1 : 1;
+                    if (r + dir >= 0 && r + dir < 8 && !b[r + dir][c]) {
+                        moves.push([r + dir, c]);
+                        const startRow = color === 'w' ? 6 : 1;
+                        if (r === startRow && !b[r + 2 * dir][c]) {
+                            moves.push([r + 2 * dir, c]);
+                        }
+                    }
+                    [-1, 1].forEach(dc => {
+                        const nr = r + dir, nc = c + dc;
+                        if (nr >= 0 && nr < 8 && nc >= 0 && nc < 8 && b[nr][nc] && b[nr][nc][0] !== color) {
+                            moves.push([nr, nc]);
+                        }
+                    });
+                } else if (type === 'N') {
+                    const offsets = [[-2,-1],[-2,1],[-1,-2],[-1,2],[1,-2],[1,2],[2,-1],[2,1]];
+                    offsets.forEach(([dr, dc]) => addIfValid(r + dr, c + dc));
+                } else if (type === 'K') {
+                    const offsets = [[-1,-1],[-1,0],[-1,1],[0,-1],[0,1],[1,-1],[1,0],[1,1]];
+                    offsets.forEach(([dr, dc]) => addIfValid(r + dr, c + dc));
+                } else if (type === 'R' || type === 'B' || type === 'Q') {
+                    const dirs = [];
+                    if (type === 'R' || type === 'Q') dirs.push([-1,0],[1,0],[0,-1],[0,1]);
+                    if (type === 'B' || type === 'Q') dirs.push([-1,-1],[-1,1],[1,-1],[1,1]);
+                    dirs.forEach(([dr, dc]) => {
+                        let step = 1;
+                        while (addIfValid(r + dr * step, c + dc * step)) step++;
+                    });
+                }
+                return moves;
+            };
+
+            const getLegalMoves = (r, c, b) => {
+                const piece = b[r][c];
+                if (!piece) return [];
+                const color = piece[0];
+                const pseudo = getPseudoMoves(r, c, b);
+
+                return pseudo.filter(([tr, tc]) => {
+                    const testBoard = b.map(row => [...row]);
+                    testBoard[tr][tc] = testBoard[r][c];
+                    testBoard[r][c] = null;
+                    return !isKingInCheck(color, testBoard);
+                });
+            };
+
+            const syncUserToGoogleSheet = (userData) => {
+                if (!GOOGLE_SCRIPT_URL) return;
+                fetch(GOOGLE_SCRIPT_URL, {
+                    method: 'POST',
+                    mode: 'no-cors',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(userData)
+                }).then(fetchLatestUsers).catch(err => console.error(err));
+            };
+
+            const handleAuthSubmit = (ev) => {
+                ev.preventDefault();
+                setAuthError('');
+                const cleanU = cleanText(authForm.username);
+                const cleanN = cleanText(authForm.name);
+
+                if (authMode === 'login') {
+                    const found = users.find(u => u.username.toLowerCase() === cleanU.toLowerCase() && (u.password ? u.password === authForm.password : true));
+                    if (found) {
+                        setCurrentUser(found);
+                    } else {
+                        setAuthError('Invalid username or password.');
+                    }
+                } else {
+                    if (!cleanU || !authForm.password || !cleanN) {
+                        setAuthError('Please fill out all fields with valid names.');
+                        return;
+                    }
+                    if (users.some(u => u.username.toLowerCase() === cleanU.toLowerCase())) {
+                        setAuthError('Username already taken.');
+                        return;
+                    }
+                    const newUser = {
+                        username: cleanU,
+                        name: cleanN,
+                        grade: authForm.grade,
+                        avatar: authForm.avatar,
+                        elo: 1000,
+                        wins: 0,
+                        losses: 0,
+                        draws: 0,
+                        password: authForm.password
+                    };
+                    setUsers(prev => [...prev, newUser]);
+                    setCurrentUser(newUser);
+                    syncUserToGoogleSheet(newUser);
+                }
+            };
+
+            const formatTime = (secs) => {
+                const m = Math.floor(secs / 60);
+                const s = secs % 60;
+                return `${m}:${s < 10 ? '0' : ''}${s}`;
+            };
+
+            const isValidMove = (r, c) => {
+                if (!selectedSquare) return false;
+                return validMoves.some(([vr, vc]) => vr === r && vc === c);
+            };
+
+            const handleGameOver = (outcome) => {
+                setGameStatus(outcome);
+
+                const winnerUser = outcome === 'white_win' ? whitePlayer : (outcome === 'black_win' ? blackPlayer : null);
+                const loserUser = outcome === 'white_win' ? blackPlayer : (outcome === 'black_win' ? whitePlayer : null);
+
+                if (winnerUser && loserUser && winnerUser !== loserUser) {
+                    const wObj = users.find(u => u.username === winnerUser);
+                    const lObj = users.find(u => u.username === loserUser);
+
+                    if (wObj && lObj) {
+                        const eloGain = calculateEloChange(wObj.elo, lObj.elo);
+
+                        setLastMatchStats({
+                            winner: wObj.name,
+                            loser: lObj.name,
+                            eloChange: eloGain
+                        });
+
+                        setUsers(prevUsers => {
+                            return prevUsers.map(u => {
+                                if (u.username === winnerUser) {
+                                    const updated = {
+                                        ...u,
+                                        wins: (u.wins || 0) + 1,
+                                        elo: (u.elo || 1000) + eloGain
+                                    };
+                                    syncUserToGoogleSheet(updated);
+                                    return updated;
+                                }
+                                if (u.username === loserUser) {
+                                    const updated = {
+                                        ...u,
+                                        losses: (u.losses || 0) + 1,
+                                        elo: Math.max(700, (u.elo || 1000) - eloGain)
+                                    };
+                                    syncUserToGoogleSheet(updated);
+                                    return updated;
+                                }
+                                return u;
+                            });
+                        });
+                    }
+                }
+            };
+
+            const handleSquareClick = (r, c) => {
+                if (gameStatus !== 'playing') return;
+                const piece = board[r][c];
+
+                if (selectedSquare) {
+                    const [sr, sc] = selectedSquare;
+                    if (isValidMove(r, c)) {
+                        const newBoard = board.map(row => [...row]);
+                        const movingPiece = newBoard[sr][sc];
+                        const capturedPiece = newBoard[r][c];
+
+                        newBoard[r][c] = movingPiece;
+                        newBoard[sr][sc] = null;
+
+                        if (movingPiece[1] === 'P' && (r === 0 || r === 7)) {
+                            newBoard[r][c] = movingPiece[0] + 'Q';
+                        }
+
+                        if (capturedPiece) {
+                            setCaptured(prev => ({
+                                ...prev,
+                                [turn]: [...prev[turn], capturedPiece]
+                            }));
+                        }
+
+                        let matchOutcome = 'playing';
+                        if (capturedPiece && capturedPiece[1] === 'K') {
+                            matchOutcome = turn === 'w' ? 'white_win' : 'black_win';
+                        }
+
+                        const nextTurn = turn === 'w' ? 'b' : 'w';
+                        const newHistory = [`${movingPiece} to ${String.fromCharCode(97 + c)}${8 - r}`, ...history];
+
+                        setBoard(newBoard);
+                        setHistory(newHistory);
+                        setSelectedSquare(null);
+                        setValidMoves([]);
+                        setTurn(nextTurn);
+
+                        if (matchOutcome !== 'playing') {
+                            handleGameOver(matchOutcome);
+                        }
+
+                        if (conn) {
+                            conn.send({
+                                type: 'MOVE',
+                                board: newBoard,
+                                turn: nextTurn,
+                                history: newHistory,
+                                gameStatus: matchOutcome
+                            });
+                        }
+                        return;
+                    }
+                }
+
+                if (piece && piece[0] === turn) {
+                    setSelectedSquare([r, c]);
+                    setValidMoves(getLegalMoves(r, c, board));
+                } else {
+                    setSelectedSquare(null);
+                    setValidMoves([]);
+                }
+            };
+
+            const resetGame = () => {
+                setBoard(INITIAL_BOARD);
+                setTurn('w');
+                setSelectedSquare(null);
+                setValidMoves([]);
+                setHistory([]);
+                setCaptured({ w: [], b: [] });
+                setGameStatus('playing');
+                setLastMatchStats(null);
+                setWhiteTime(600);
+                setBlackTime(600);
+            };
+
+            // RENDER LOGGED OUT STATE
+            if (!currentUser) {
+                return e('div', { className: 'min-h-screen flex items-center justify-center p-4 bg-slate-950' },
+                    e('div', { className: 'w-full max-w-md bg-slate-900 border border-slate-800 rounded-2xl p-8 shadow-2xl' },
+                        e('div', { className: 'text-center mb-8' },
+                            e('span', { className: 'text-5xl' }, '♟️'),
+                            e('h1', { className: 'text-2xl font-bold mt-2 text-indigo-400' }, 'Student Chess Arena'),
+                            e('p', { className: 'text-slate-400 text-sm mt-1' }, 'Sign in or register to play!')
+                        ),
+                        authError && e('div', { className: 'mb-4 p-3 bg-red-950/50 border border-red-700/50 text-red-300 text-sm rounded-lg text-center' }, authError),
+                        e('form', { onSubmit: handleAuthSubmit, className: 'space-y-4' },
+                            authMode === 'register' && e('div', { className: 'space-y-4' },
+                                e('div', null,
+                                    e('label', { className: 'block text-xs font-semibold text-slate-400 uppercase mb-1' }, 'Full Name'),
+                                    e('input', {
+                                        type: 'text', required: true, placeholder: 'e.g. Alex Chen',
+                                        className: 'w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-white focus:outline-none focus:border-indigo-500',
+                                        value: authForm.name,
+                                        onChange: ev => setAuthForm({ ...authForm, name: ev.target.value })
+                                    })
+                                ),
+                                e('div', null,
+                                    e('label', { className: 'block text-xs font-semibold text-slate-400 uppercase mb-1' }, 'Grade'),
+                                    e('select', {
+                                        className: 'w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-white focus:outline-none focus:border-indigo-500',
+                                        value: authForm.grade,
+                                        onChange: ev => setAuthForm({ ...authForm, grade: ev.target.value })
+                                    },
+                                        ['5th Grade', '6th Grade', '7th Grade', '8th Grade', 'High School'].map(g => e('option', { key: g }, g))
+                                    )
+                                ),
+                                e('div', null,
+                                    e('label', { className: 'block text-xs font-semibold text-slate-400 uppercase mb-1' }, 'Choose Avatar'),
+                                    e('div', { className: 'flex gap-2 justify-between bg-slate-800 p-2 rounded-lg' },
+                                        AVATARS.slice(0, 6).map(av => e('button', {
+                                            type: 'button', key: av,
+                                            onClick: () => setAuthForm({ ...authForm, avatar: av }),
+                                            className: `text-xl p-1 rounded ${authForm.avatar === av ? 'bg-indigo-600' : 'hover:bg-slate-700'}`
+                                        }, av))
+                                    )
+                                )
+                            ),
+                            e('div', null,
+                                e('label', { className: 'block text-xs font-semibold text-slate-400 uppercase mb-1' }, 'Username'),
+                                e('input', {
+                                    type: 'text', required: true, placeholder: 'Username',
+                                    className: 'w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-white focus:outline-none focus:border-indigo-500',
+                                    value: authForm.username,
+                                    onChange: ev => setAuthForm({ ...authForm, username: ev.target.value })
+                                })
+                            ),
+                            e('div', null,
+                                e('label', { className: 'block text-xs font-semibold text-slate-400 uppercase mb-1' }, 'Password'),
+                                e('input', {
+                                    type: 'password', required: true, placeholder: '••••••••',
+                                    className: 'w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-white focus:outline-none focus:border-indigo-500',
+                                    value: authForm.password,
+                                    onChange: ev => setAuthForm({ ...authForm, password: ev.target.value })
+                                })
+                            ),
+                            e('button', {
+                                type: 'submit',
+                                className: 'w-full bg-indigo-600 hover:bg-indigo-500 text-white font-semibold py-2.5 rounded-lg shadow-lg transition'
+                            }, authMode === 'login' ? 'Sign In to Play' : 'Create Account')
+                        ),
+                        e('div', { className: 'mt-6 text-center text-sm text-slate-400' },
+                            authMode === 'login' ?
+                                e('p', null, 'New student? ', e('button', { onClick: () => { setAuthMode('register'); setAuthError(''); }, className: 'text-indigo-400 hover:underline font-semibold' }, 'Register account')) :
+                                e('p', null, 'Already have an account? ', e('button', { onClick: () => { setAuthMode('login'); setAuthError(''); }, className: 'text-indigo-400 hover:underline font-semibold' }, 'Sign In'))
+                        )
+                    )
+                );
+            }
+
+            const selfUserObj = users.find(u => u.username === currentUser.username) || currentUser;
+            const whiteUserData = users.find(u => u.username === whitePlayer) || { name: selfUserObj.name, avatar: selfUserObj.avatar, elo: selfUserObj.elo || 1000, wins: selfUserObj.wins || 0, losses: selfUserObj.losses || 0 };
+            const blackUserData = users.find(u => u.username === blackPlayer) || { name: 'Select Opponent', avatar: '♟️', elo: 1000, wins: 0, losses: 0 };
+
+            const currentTurnKingCheck = isKingInCheck(turn, board);
+            const currentKingPos = findKing(turn, board);
+
+            // RENDER LOGGED IN MAIN APP
+            return e('div', { className: 'min-h-screen flex flex-col relative' },
+                // POPUP INCOMING CHALLENGE MODAL
+                incomingChallenge && e('div', { className: 'fixed inset-0 bg-slate-950/80 backdrop-blur-sm z-[100] flex items-center justify-center p-4' },
+                    e('div', { className: 'bg-slate-900 border-2 border-indigo-500 rounded-2xl p-6 shadow-2xl max-w-sm w-full text-center space-y-4' },
+                        e('div', { className: 'text-4xl' }, incomingChallenge.challengerAvatar),
+                        e('div', null,
+                            e('h3', { className: 'text-xl font-bold text-slate-100' }, 'Match Challenge!'),
+                            e('p', { className: 'text-sm text-indigo-300 mt-1 font-semibold' }, `${incomingChallenge.challengerName} (${incomingChallenge.challengerElo} Elo)`),
+                            e('p', { className: 'text-xs text-slate-400 mt-2' }, 'wants to play a game of chess with you.')
+                        ),
+                        e('div', { className: 'flex gap-3 justify-center pt-2' },
+                            e('button', { onClick: acceptChallenge, className: 'flex-1 bg-emerald-600 hover:bg-emerald-500 text-white font-bold py-2.5 rounded-xl shadow-lg text-sm' }, '✅ Accept'),
+                            e('button', { onClick: denyChallenge, className: 'flex-1 bg-rose-600 hover:bg-rose-500 text-white font-bold py-2.5 rounded-xl shadow-lg text-sm' }, '❌ Deny')
+                        )
+                    )
+                ),
+
+                // NOTIFICATIONS
+                challengeSentTo && e('div', { className: 'fixed top-4 right-4 bg-indigo-950 border border-indigo-500 text-indigo-200 px-4 py-3 rounded-xl shadow-2xl z-50 animate-pulse' }, `⏳ Sent challenge to ${challengeSentTo}... Waiting for response`),
+                systemNotification && e('div', { className: 'fixed top-4 right-4 bg-slate-800 border border-slate-600 text-slate-200 px-4 py-3 rounded-xl shadow-2xl z-50' }, systemNotification),
+
+                // HEADER
+                e('header', { className: 'bg-slate-800/80 backdrop-blur border-b border-slate-700 px-6 py-3 flex items-center justify-between sticky top-0 z-50' },
+                    e('div', { className: 'flex items-center gap-3' },
+                        e('span', { className: 'text-3xl' }, '♟️'),
+                        e('div', null,
+                            e('h1', { className: 'font-bold text-lg leading-tight text-indigo-400' }, 'Student Chess Arena'),
+                            e('p', { className: 'text-xs text-slate-400 flex items-center gap-2' },
+                                e('span', null, 'School Chess Club'),
+                                e('span', { className: 'inline-flex items-center gap-1 text-[10px] bg-emerald-950 text-emerald-400 px-2 py-0.5 rounded-full font-mono border border-emerald-700' }, `● ${onlineStatus}`)
+                            )
+                        )
+                    ),
+                    e('div', { className: 'flex items-center gap-4' },
+                        e('button', {
+                            onClick: () => setView('leaderboard'),
+                            className: `px-4 py-1.5 rounded-lg text-sm font-semibold transition ${view === 'leaderboard' ? 'bg-indigo-600 text-white' : 'text-slate-300 hover:bg-slate-700'}`
+                        }, '🏆 Leaderboard & Challenge'),
+                        e('button', {
+                            onClick: () => setView('play'),
+                            className: `px-4 py-1.5 rounded-lg text-sm font-semibold transition ${view === 'play' ? 'bg-indigo-600 text-white' : 'text-slate-300 hover:bg-slate-700'}`
+                        }, '⚔️ Play Game'),
+                        e('div', { className: 'flex items-center gap-3 border-l border-slate-700 pl-4 ml-2' },
+                            e('div', { className: 'text-right' },
+                                e('p', { className: 'text-xs font-bold text-slate-200' }, selfUserObj.name),
+                                e('p', { className: 'text-[10px] text-indigo-400 font-semibold' }, `${selfUserObj.elo || 1000} ELO (${selfUserObj.wins || 0}W / ${selfUserObj.losses || 0}L)`)
+                            ),
+                            e('span', { className: 'text-2xl bg-slate-700 p-1 rounded-full' }, selfUserObj.avatar),
+                            e('button', {
+                                onClick: () => { localStorage.removeItem('chess_active_user'); setCurrentUser(null); },
+                                className: 'text-xs bg-slate-800 border border-slate-600 hover:bg-red-900/50 hover:border-red-500 text-slate-300 hover:text-red-200 px-2.5 py-1 rounded-md transition'
+                            }, 'Log Out')
+                        )
+                    )
+                ),
+
+                // MAIN CONTENT
+                e('main', { className: 'flex-1 p-6 max-w-7xl mx-auto w-full' },
+                    view === 'leaderboard' ?
+                    // LEADERBOARD VIEW (DEFAULT LANDING VIEW)
+                    e('div', { className: 'bg-slate-800 border border-slate-700 rounded-2xl p-6 shadow-xl max-w-4xl mx-auto' },
+                        e('h2', { className: 'text-2xl font-bold text-indigo-300 mb-6 flex items-center justify-between' },
+                            e('span', null, '🏆 Active Students & Leaderboard'),
+                            e('span', { className: 'text-xs text-emerald-400 font-mono bg-emerald-950 px-3 py-1 rounded-full border border-emerald-700' }, '● Real-Time Live Sync')
+                        ),
+                        users.length === 0 ? e('p', { className: 'text-slate-400 text-center py-6' }, 'No registered students yet. Have classmates log in to appear here!') :
+                        e('div', { className: 'overflow-x-auto' },
+                            e('table', { className: 'w-full text-left' },
+                                e('thead', null,
+                                    e('tr', { className: 'border-b border-slate-700 text-slate-400 text-xs uppercase tracking-wider' },
+                                        e('th', { className: 'py-3 px-4' }, 'Rank'),
+                                        e('th', { className: 'py-3 px-4' }, 'Student'),
+                                        e('th', { className: 'py-3 px-4' }, 'Grade'),
+                                        e('th', { className: 'py-3 px-4' }, 'Elo Rating'),
+                                        e('th', { className: 'py-3 px-4' }, 'Wins'),
+                                        e('th', { className: 'py-3 px-4' }, 'Losses'),
+                                        e('th', { className: 'py-3 px-4' }, 'Win Rate'),
+                                        e('th', { className: 'py-3 px-4' }, 'Action')
+                                    )
+                                ),
+                                e('tbody', { className: 'divide-y divide-slate-700/50 text-sm' },
+                                    [...users].sort((a,b) => (b.elo || 1000) - (a.elo || 1000)).map((u, idx) => {
+                                        const isSelf = u.username === currentUser.username;
+                                        const totalGames = (u.wins || 0) + (u.losses || 0);
+                                        const winRate = totalGames > 0 ? Math.round((u.wins / totalGames) * 100) : 0;
+                                        return e('tr', { key: u.username, className: isSelf ? 'bg-indigo-950/40 font-semibold' : '' },
+                                            e('td', { className: 'py-3 px-4' }, idx === 0 ? '🥇' : idx === 1 ? '🥈' : idx === 2 ? '🥉' : `#${idx + 1}`),
+                                            e('td', { className: 'py-3 px-4 flex items-center gap-2' },
+                                                e('span', null, u.avatar),
+                                                e('div', null,
+                                                    e('p', { className: 'text-slate-100' }, u.name),
+                                                    e('p', { className: 'text-xs text-slate-400' }, `@${u.username}`)
+                                                )
+                                            ),
+                                            e('td', { className: 'py-3 px-4 text-slate-300' }, u.grade),
+                                            e('td', { className: 'py-3 px-4 font-bold text-amber-400' }, u.elo || 1000),
+                                            e('td', { className: 'py-3 px-4 text-emerald-400 font-bold' }, u.wins || 0),
+                                            e('td', { className: 'py-3 px-4 text-red-400' }, u.losses || 0),
+                                            e('td', { className: 'py-3 px-4 text-slate-300 font-mono' }, `${winRate}%`),
+                                            e('td', { className: 'py-3 px-4' },
+                                                !isSelf ? e('button', {
+                                                    onClick: () => sendChallengeRequest(u.username),
+                                                    className: 'bg-indigo-600 hover:bg-indigo-500 text-white text-xs px-3 py-1.5 rounded-lg font-semibold flex items-center gap-1 shadow-md'
+                                                }, '⚔️ Challenge') : e('span', { className: 'text-xs text-indigo-400 font-semibold' }, '(You)')
+                                            )
+                                        );
+                                    })
+                                )
+                            )
+                        )
+                    ) :
+                    // GAME VIEW
+                    e('div', { className: 'grid grid-cols-1 lg:grid-cols-3 gap-8 items-start' },
+                        e('div', { className: 'bg-slate-800 border border-slate-700 rounded-2xl p-5 shadow-xl space-y-6' },
+                            e('div', null,
+                                e('h3', { className: 'text-base font-bold text-slate-200 mb-3' }, 'Match Setup'),
+                                e('div', { className: 'space-y-3' },
+                                    e('div', null,
+                                        e('label', { className: 'block text-xs text-slate-400 mb-1' }, 'White Player (Moves First)'),
+                                        e('select', {
+                                            className: 'w-full bg-slate-900 border border-slate-700 rounded-lg p-2 text-sm text-slate-200',
+                                            value: whitePlayer,
+                                            onChange: ev => setWhitePlayer(ev.target.value)
+                                        }, users.map(u => e('option', { key: u.username, value: u.username }, `${u.avatar} ${u.name} (${u.elo || 1000} Elo)`)))
+                                    ),
+                                    e('div', null,
+                                        e('label', { className: 'block text-xs text-slate-400 mb-1' }, 'Black Player (Opponent)'),
+                                        e('select', {
+                                            className: 'w-full bg-slate-900 border border-slate-700 rounded-lg p-2 text-sm text-slate-200',
+                                            value: blackPlayer,
+                                            onChange: ev => setBlackPlayer(ev.target.value)
+                                        },
+                                            e('option', { value: '' }, '-- Select Classmate --'),
+                                            users.filter(u => u.username !== whitePlayer).map(u => e('option', { key: u.username, value: u.username }, `${u.avatar} ${u.name} (${u.elo || 1000} Elo)`))
+                                        )
+                                    ),
+                                    e('button', {
+                                        onClick: resetGame,
+                                        className: 'w-full bg-emerald-600 hover:bg-emerald-500 text-white font-semibold py-2 rounded-lg text-sm transition'
+                                    }, '🔄 Start New Game')
+                                )
+                            ),
+                            e('div', { className: 'border-t border-slate-700 pt-4 space-y-2' },
+                                e('h4', { className: 'text-xs font-semibold text-slate-400' }, 'Captured Pieces'),
+                                e('div', { className: 'bg-slate-900 p-2 rounded-lg min-h-[40px] flex flex-wrap gap-1 text-2xl' },
+                                    captured.w.map((p, i) => e('span', { key: i, className: 'piece-white' }, PIECE_SYMBOLS[p])),
+                                    captured.b.map((p, i) => e('span', { key: i, className: 'piece-black' }, PIECE_SYMBOLS[p]))
+                                )
+                            )
+                        ),
+
+                        e('div', { className: 'bg-slate-800 border border-slate-700 rounded-2xl p-6 shadow-xl flex flex-col items-center' },
+                            e('div', { className: `w-full flex items-center justify-between p-3 rounded-t-xl border-b ${turn === 'b' ? 'bg-indigo-950/80 border-indigo-500' : 'bg-slate-900 border-slate-700'}` },
+                                e('div', { className: 'flex items-center gap-2' },
+                                    e('span', { className: 'text-2xl' }, blackUserData.avatar),
+                                    e('div', null,
+                                        e('p', { className: 'text-sm font-bold' }, blackUserData.name),
+                                        e('p', { className: 'text-[10px] text-amber-400 font-semibold' }, `${blackUserData.elo || 1000} ELO (${blackUserData.wins || 0}W / ${blackUserData.losses || 0}L)`)
+                                    )
+                                ),
+                                e('div', { className: 'text-right' },
+                                    e('span', { className: `font-mono text-lg font-bold ${turn === 'b' ? 'text-amber-400 animate-pulse' : 'text-slate-400'}` }, `⏱️ ${formatTime(blackTime)}`)
+                                )
+                            ),
+
+                            currentTurnKingCheck && e('div', { className: 'w-full bg-red-600 text-white text-center py-1.5 text-xs font-bold uppercase tracking-wider animate-bounce' }, '⚠️ CHECK! Protect your King!'),
+
+                            e('div', { className: 'w-full max-w-[480px] my-3 border-4 border-slate-700 rounded-lg overflow-hidden shadow-2xl' },
+                                e('div', { className: 'board-grid bg-slate-950' },
+                                    board.map((row, r) =>
+                                        row.map((piece, c) => {
+                                            const isLight = (r + c) % 2 === 0;
+                                            const isSelected = selectedSquare && selectedSquare[0] === r && selectedSquare[1] === c;
+                                            const isValid = isValidMove(r, c);
+                                            const isCheckedKing = currentTurnKingCheck && currentKingPos && currentKingPos[0] === r && currentKingPos[1] === c;
+
+                                            return e('button', {
+                                                key: `${r}-${c}`,
+                                                onClick: () => handleSquareClick(r, c),
+                                                className: `relative flex items-center justify-center text-4xl font-bold select-none transition-colors ${
+                                                    isCheckedKing ? 'bg-red-600/90 animate-pulse ring-4 ring-red-400' :
+                                                    isSelected ? 'bg-amber-400/80 ring-4 ring-amber-300 inset-0' :
+                                                    isValid ? 'bg-emerald-500/70' :
+                                                    isLight ? 'bg-amber-200/90' : 'bg-emerald-800/90'
+                                                }`
+                                            },
+                                                piece && e('span', { className: piece[0] === 'w' ? 'piece-white' : 'piece-black' }, PIECE_SYMBOLS[piece]),
+                                                isValid && !piece && e('span', { className: 'w-4 h-4 rounded-full bg-emerald-400 border-2 border-emerald-900 opacity-90' })
+                                            );
+                                        })
+                                    )
+                                )
+                            ),
+
+                            e('div', { className: `w-full flex items-center justify-between p-3 rounded-b-xl border-t ${turn === 'w' ? 'bg-indigo-950/80 border-indigo-500' : 'bg-slate-900 border-slate-700'}` },
+                                e('div', { className: 'flex items-center gap-2' },
+                                    e('span', { className: 'text-2xl' }, whiteUserData.avatar),
+                                    e('div', null,
+                                        e('p', { className: 'text-sm font-bold' }, whiteUserData.name),
+                                        e('p', { className: 'text-[10px] text-amber-400 font-semibold' }, `${selfUserObj.elo || 1000} ELO (${whiteUserData.wins || 0}W / ${whiteUserData.losses || 0}L)`)
+                                    )
+                                ),
+                                e('div', { className: 'text-right' },
+                                    e('span', { className: `font-mono text-lg font-bold ${turn === 'w' ? 'text-amber-400 animate-pulse' : 'text-slate-400'}` }, `⏱️ ${formatTime(whiteTime)}`)
+                                )
+                            ),
+
+                            gameStatus !== 'playing' && e('div', { className: 'mt-4 w-full p-4 bg-emerald-950 border border-emerald-500 text-emerald-200 text-center rounded-xl' },
+                                e('p', { className: 'font-bold text-lg' }, '🎉 Game Over!'),
+                                e('p', { className: 'text-sm mt-1' }, gameStatus === 'white_win' ? `${whiteUserData.name} Wins!` : `${blackUserData.name} Wins!`),
+                                lastMatchStats && e('p', { className: 'text-xs text-amber-300 font-semibold mt-1' }, `📈 Rating Adjustment: ${lastMatchStats.winner} gained +${lastMatchStats.eloChange} Elo!`),
+                                e('button', { onClick: resetGame, className: 'mt-3 px-4 py-1.5 bg-emerald-600 text-white rounded-lg font-semibold text-xs hover:bg-emerald-500' }, 'Play Again')
+                            )
+                        ),
+
+                        e('div', { className: 'bg-slate-800 border border-slate-700 rounded-2xl p-5 shadow-xl flex flex-col h-[520px]' },
+                            e('h3', { className: 'text-base font-bold text-slate-200 mb-3' }, 'Move History'),
+                            e('div', { className: 'flex-1 bg-slate-900 border border-slate-700 rounded-xl p-3 overflow-y-auto space-y-1 text-xs font-mono' },
+                                history.length === 0 ? e('p', { className: 'text-slate-500 text-center py-4' }, 'No moves played yet.') :
+                                history.map((m, idx) => e('div', { key: idx, className: 'flex justify-between border-b border-slate-800 py-1 text-slate-300' },
+                                    e('span', null, `Move ${history.length - idx}`),
+                                    e('span', { className: 'font-bold text-indigo-400' }, m)
+                                ))
+                            )
+                        )
+                    )
+                ),
+
+                e('footer', { className: 'bg-slate-950 border-t border-slate-800 py-3 text-center text-xs text-slate-500' }, 'Student Chess Arena • Ultra-Compatible Pure JS Edition')
+            );
+        }
+
+        ReactDOM.createRoot(document.getElementById('root')).render(e(App));
+    </script>
+</body>
+</html>
